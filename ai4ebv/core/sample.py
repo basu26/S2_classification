@@ -32,8 +32,8 @@ LOGGER = logging.getLogger(__name__)
 INDEX_FEATURES = ['ndvi', 'ndsi', 'ndbi', 'ndwi']
 
 # classes for which an additional threshold-based filter is applied
-SUPERVISED_CLASSES = [Legend.Water_bodies, Legend.Glaciers]
-
+#SUPERVISED_CLASSES = [Legend.Water_bodies, Legend.Glaciers]
+SUPERVISED_CLASSES = []
 
 class TrainingDataFactory(object):
     """Automatic training data sampling class."""
@@ -68,6 +68,7 @@ class TrainingDataFactory(object):
 
         # HLS multispectral time series: scale to physical units
         self.hls_ts = self.hls_scale(hls_ts)
+        #print(hls_ts)
 
         # whether to apply quality assessment layer
         if qa:
@@ -87,6 +88,7 @@ class TrainingDataFactory(object):
         LOGGER.info('Land cover labels: {}'.format(labels))
         #self.labels = self.read_labels(labels, label_name)
         self.labels = img2np(labels)
+        #print(labels)
         
         # apply spectral filter -----------------------------------------------
 
@@ -118,21 +120,23 @@ class TrainingDataFactory(object):
             The spectrally filtered input land cover product.
 
         """
-        # initialize training data samples array
+        
         LogConfig.init_log('Applying spectral filter to input labels.')
-        samples = (np.ones(shape=hls_ts.x.shape + hls_ts.y.shape,
-                           dtype=np.int16) * Legend.NoData.id)
+        samples = (np.ones(shape=hls_ts.x.shape + hls_ts.y.shape, dtype=np.int16) * Legend.NoData.id)
         
         def _filter(labels, class_label):
             # erode boundary pixels
             mask = TrainingDataFactory.is_homogeneous(
                 labels == class_label.id, kernel_size)
+            #comment the following when generating samples
+            valid = mask
+            valid = valid.transpose            
+
+            # unsupervised spectral filter: remove outliers (comment the following when using existing samples)
+            # valid = TrainingDataFactory.distance_to_centroid(
+            #    hls_ts, mask, **kwargs)
+
             
-
-            # unsupervised spectral filter: remove outliers
-            valid = TrainingDataFactory.distance_to_centroid(
-                hls_ts, mask, **kwargs)
-
             # additional supervised threshold-based spectral filter for:
             #    - Water surfaces: NDWI > 0
             #    - Snow and ice  : NDSI > 0.4 & NIR > 0.11
@@ -147,7 +151,6 @@ class TrainingDataFactory(object):
         valid = Parallel(n_jobs=-1, verbose=51)(delayed(_filter)(labels, label) for label in class_labels)
         # for label in class_labels:
             #_filter(labels, label)
-        
 
         # write spectrally filtered pixels to array of valid pixels
         for i, label in enumerate(class_labels):
@@ -293,7 +296,7 @@ class TrainingDataFactory(object):
         """
         counts = convolve2d(arr, np.ones(2 * (kernel_size, )), mode='same',
                             boundary='fill', fillvalue=0)
-        print(arr)
+        #print(arr)
         return counts == (kernel_size ** 2)
 
     @staticmethod
@@ -356,7 +359,7 @@ class TrainingDataFactory(object):
         return distance
 
     @staticmethod
-    def distance_to_centroid(train_ds, mask, quantile=0.9, window_size=None):
+    def distance_to_centroid(train_ds, mask, quantile=0.9, window_size=1250):
         """Moving window algorithm for the spectral outlier detection.
 
         Parameters
@@ -389,6 +392,7 @@ class TrainingDataFactory(object):
             # split time series to local windows
             ds = train_ds.to_array().chunk({'x': window_size,
                                             'y': window_size}).data
+            #print(ds)
 
             # iterate over local windows
             for idx, pos in window_coordinates.items():
@@ -411,6 +415,7 @@ class TrainingDataFactory(object):
 
                     # write valid pixels to boolean mask
                     valid[idx, l_rows[selected], l_cols[selected]] = 1
+                    #print(valid.shape)
 
             # reshape local windows to original shape
             valid = reconstruct_scene(valid)
@@ -694,13 +699,16 @@ class TrainingDataFactory(object):
         """
         # initiate training data sampling for current class
         selected = np.zeros(samples.shape)
+        #print(samples.shape)
 
         # get the indices of the current class in the tile
+        #print(label)
         mask = samples == label
         rows, cols = np.where(mask)
 
         # number of available pixels for current class
         available = np.count_nonzero(mask)
+        #print(available)
 
         # number of pixels to sample
         if apriori:
@@ -774,7 +782,7 @@ class TrainingDataFactory(object):
 
     @staticmethod
     def generate_training_data(hls_ts, samples, labels, N, layer_only=False,
-                               no_data=Legend.NoData.id, **kwargs):
+                               no_data=Legend.NoData.id, tname=None, **kwargs):
         """Retrieve the spectra of the training data from the HLS time series.
 
         Parameters
@@ -818,13 +826,27 @@ class TrainingDataFactory(object):
                  no_data)
 
         # run spatially stratified training data sampling in parallel
-        selected = Parallel(n_jobs=-1, verbose=51)(
-            delayed(TrainingDataFactory.spatially_stratified_sampling)(
-                samples, N, label.id, **kwargs) for label in labels)
+
+        if tname.exists():
+            print("Using existing lables from file")
+            train = xr.open_rasterio(tname)
+            train_labels = train.squeeze('band')
+            #train_labels = train_labels.values
+            selected = []
+            for label in labels:
+                selected.append(train_labels == label.id)
+        
+        else:
+            print("Generating sampling data")
+            selected = Parallel(n_jobs=-1, verbose=51)(
+                delayed(TrainingDataFactory.spatially_stratified_sampling)(
+                    samples, N, label.id, **kwargs) for label in labels)
+
 
         # fill the training data layer
         for label, sel in zip(labels, selected):
             layer[np.where(sel)] = label.id
+
 
         # check whether to return only position of training data or position
         # and spectra
@@ -834,6 +856,17 @@ class TrainingDataFactory(object):
             def _retrieve_spectra(hls_ts, label, mask):
                 # indices of the mask
                 rows, cols = np.where(mask)
+                #comment out the following section when generating samples and uncomment when using existing samples
+                row_cord = []
+                col_cord = []
+                for row in rows:
+                    coord_y = mask.y[row].values
+                    row_cord.append(coord_y)
+                for col in cols:
+                    coord_x = mask.x[col].values
+                    col_cord.append(coord_x)
+                rows = np.array(row_cord)
+                cols = np.array(col_cord)
 
                 # log how many pixels have been sampled for the class
                 LOGGER.info('Sampled {} pixels for class: {}'.format(
@@ -846,12 +879,14 @@ class TrainingDataFactory(object):
                 # create xarray dataarrays to select pixels of current class
                 rows, cols = (xr.DataArray(rows, dims='samples'),
                               xr.DataArray(cols, dims='samples'))
+                #print(cols, rows)
 
                 # catch RuntimeWarnings of dask: clutters logging
                 with warnings.catch_warnings():
                     warnings.filterwarnings('ignore', category=RuntimeWarning)
 
                     # time series of the selected pixels
+                    #print(hls_ts.x, hls_ts.y)
                     ds = hls_ts.sel(x=cols, y=rows)
 
                     # add label to fields
@@ -866,6 +901,7 @@ class TrainingDataFactory(object):
             # retrieve spectra of training data
             LogConfig.init_log('Retrieving training data spectra.')
             training_data = []
+            #print(selected[0].shape)
             for label, mask in zip(labels, selected):
                 training_data.append(_retrieve_spectra(hls_ts, label, mask))
 
@@ -911,8 +947,10 @@ class TrainingDataFactory(object):
         LogConfig.init_log('Loading training data to memory.')
         if isinstance(training_data, xr.Dataset):
             ds = training_data
+        
         else:
             ds = xr.open_dataset(training_data)
+            
 
         # get labels of the training data: constant over time
         labels = ds.label.isel(time=0).values
@@ -925,7 +963,11 @@ class TrainingDataFactory(object):
         # whether to use the raw time series or derive classification features
         if not features:
             # reshape: (nsamples, bands, length)
-            inputs = ds.to_array().values.swapaxes(0, -1).swapaxes(1, -1)
+            #inputs = ds.to_array().values.swapaxes(0, -1).swapaxes(1, -1)
+            inputs = ds.to_array()
+            inputs = inputs.values.swapaxes(0, -1)
+            inputs = inputs.reshape(inputs.shape[0], -1)
+            #print(inputs, inputs.shape)
         else:
             # generate classification features
             if percentiles is None:
@@ -934,6 +976,8 @@ class TrainingDataFactory(object):
             # shape: (bands, ..., nsamples)
             inputs = TrainingDataFactory.features(ds, percentiles,
                                                   seasonal=seasonal).to_array()
+            #inputs = ds.to_array()
+            #print(inputs.shape)
 
             # reshape: (nsamples, seasons, features, bands)
             inputs = inputs.values.swapaxes(0, -1)
