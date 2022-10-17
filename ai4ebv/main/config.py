@@ -23,11 +23,11 @@ MOSAIC = True
 # MOSAIC = False
 
 # year of interest
-YEAR = 2017
+YEAR = 2021
 
 # months of relevant HLS image data
-MONTHS = [6, 7, 8]
-# MONTHS = []
+# MONTHS = [1, 2,]
+MONTHS = []
 
 # HLS tiles of interest
 # TILES = LISS_TILES
@@ -38,6 +38,14 @@ TILES = ['32TPS']
 TILES = tuple([tile.lstrip('T') for tile in TILES])
 #assert (set(TILES).intersection(ALPS_TILES) or
 #        set(TILES).intersection(HIMALAYAS_TILES))
+# Sateliie to use
+satellite = "Sentinel-1"
+
+# Incase of Sentinel 1, specify orbit (DSC, ASC)
+orbit = 'DSC'
+
+# Incase of Sentinel 1, specify product type (INT, COH, INT-COH)
+product = 'INT-COH'
 
 # -----------------------------------------------------------------------------
 # Training data sampling ------------------------------------------------------
@@ -50,8 +58,8 @@ OVERWRITE_TRAINING_DATA = False
 NPIXEL = 1000
 
 # use spectral indices as classification features
-# USE_INDICES = False
-USE_INDICES = True
+USE_INDICES = False
+# USE_INDICES = True
 
 # number of pixels defining radius around a training pixel, within which no
 # other training pixel should be sampled
@@ -89,8 +97,8 @@ APPLY_QA = False
 # APPLY_QA = True
 
 # whether to predict using classification features or raw time series
-FEATURES = True
-# FEATURES = False
+# FEATURES = True
+FEATURES = False
 
 # whether to compute classification features on annual or seasonal scale
 SEASONAL = False
