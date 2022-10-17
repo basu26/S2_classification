@@ -14,6 +14,8 @@ from datetime import timedelta
 import numpy as np
 import xarray as xr
 from osgeo import gdal
+import os, glob
+import pathlib
 
 # locals
 from ai4ebv.core.dataset import HLSDataset
@@ -24,12 +26,12 @@ from ai4ebv.core.predict import predict_hls_tile
 from ai4ebv.core.utils import mosaic_tiles
 from ai4ebv.core.constants import (ALPS_TILES, STT_TILES, HIMALAYAS_SITE,
                                    TILE_PATTERN, ALPS_CRS, HIMALAYAS_CRS)
-from ai4ebv.main.io import (ROOT, ROOTmy, TS_PATH, CLASS_PATH, TRAIN_PATH, LC_LAYERS,
+from ai4ebv.main.io import (ROOT, ROOTmy, ASC_mask, DSC_mask, TS_PATH, MASK_PATH, CLASS_PATH, TRAIN_PATH, LC_LAYERS,
                             DEM_LAYERS)
 from ai4ebv.main.config import (TILES, YEAR, MONTHS, NPIXEL, BUFFER, DROPNA,
                                 DROPQA, OVERWRITE_TIME_SERIES, LC_LABELS,
                                 AZURE, USE_INDICES, DEM, APPLY_QA, MOSAIC,
-                                OVERWRITE_TRAINING_DATA, SEASONAL)
+                                OVERWRITE_TRAINING_DATA, SEASONAL, satellite, orbit, product)
 from ai4ebv.main.sklearn_config import clf, TILE_SIZE, SKLEARN_OVERWRITE
 from pysegcnn.core.logging import log_conf
 from pysegcnn.core.trainer import LogConfig
@@ -73,8 +75,9 @@ if __name__ == '__main__':
 
         # classifier file name
         state = HLSDataset.state_file(
-            model=clf.estimator['clf'].__class__.__name__, labels=LC_LABELS,
-            npixel=NPIXEL, features=True, use_indices=USE_INDICES, dem=DEM,
+            #model=clf.estimator['clf'].__class__.__name__, labels=LC_LABELS,
+            model=clf.__name__, labels=LC_LABELS,
+            npixel=NPIXEL, features=False, use_indices=USE_INDICES, dem=DEM,
             qa=APPLY_QA, mode='single', months=MONTHS, year=YEAR,
             seasonal=SEASONAL)
 
@@ -107,38 +110,281 @@ if __name__ == '__main__':
         # ---------------------------------------------------------------------
 
         # check if time series exists on disk
-        time_series = TS_PATH.joinpath(
-            tile, str(YEAR), HLSDataset.time_series(tile, str(YEAR), MONTHS))
-        if time_series.exists() and not OVERWRITE_TIME_SERIES:
-            # read HLS time series from disk
-            LOGGER.info('Found existing time series: {}'.format(time_series))
-            hls_ts = xr.open_dataset(time_series)
+        if satellite == 'Sentinel-2':
+            tile = "32TQS"
+            time_series = TS_PATH.joinpath(satellite, tile, str(YEAR))
+            time_series = str(time_series)
+            print(time_series)
+            s2_netcdfs = sorted(glob.glob(time_series + '/*2021.nc'))
+            for i,f in enumerate(s2_netcdfs):
+                #print(i,f)
+                monthly_data = xr.open_dataarray(f,decode_coords="all",chunks={'time':1,'x':1000,'y':1000})
+                if i == 0:
+                    yearly_data_S2 = monthly_data
+                    pass
+                else:
+                    yearly_data_S2 = xr.concat([yearly_data_S2,monthly_data],dim='time')
+                    yearly_data_S2 = yearly_data_S2.sortby('time')
+            dataset = yearly_data_S2.to_dataset(dim = 'variable')
+            var_dict = dict({'B02': 'blue', 'B03': 'green', 'B04': 'red', 'B08': 'nir', 'B11': 'swir1', 'B12': 'swir2'})
+            dataset = dataset.rename(var_dict)
+            dataset = dataset.sortby('time')
+            # dataset = dataset[dict(x=slice(0, 2500))]
+            # dataset = dataset[dict(y=slice(0, 2500))]
+            # dataset['x'] = np.arange(0,len(dataset.x))
+            # dataset['y'] = np.arange(0,len(dataset.y))
+            
         else:
-            # instanciate the HLS-dataset
-            hls = HLSDataset.initialize(ROOT, tile, YEAR, months=MONTHS,
-                                        azure=False)
-
-            # check whether scenes are available on Azure Cloud or Nasa's Ftp
-            if not hls.scenes:
-                LOGGER.info('Requested tile {} for year {} is not available '
-                            'on {}.'.format(hls.tile, hls.year, hls.ftp))
-                continue
-
-            # generate HLS time series: xarray.Dataset
-            hls_ts = hls.to_xarray(time_series, spatial_coverage=DROPNA,
-                                   cloud_coverage=DROPQA, save=True,
-                                   overwrite=OVERWRITE_TIME_SERIES)
-
-            # check if at least one valid image is found
-            if hls_ts is None:
-                continue
+            if product == 'COH':
+                print('stacking coherence')
+                
+                tile = 'ST'
+                coh = 'COH'
+                orbit = 'DSC'
+                time_series = TS_PATH.joinpath(satellite, orbit, coh, tile, str(YEAR))
+                time_series = str(time_series)
+                print(time_series)
+                s1_netcdfs_coh = sorted(glob.glob(time_series + '/ST*.nc'))
+                for i,f in enumerate(s1_netcdfs_coh):
+                    monthly_data = xr.open_dataarray(f,decode_coords="all",chunks={'time':1,'x':1000,'y':1000})
+                    if i == 0:
+                        yearly_data_coh = monthly_data
+                        pass
+                    else:
+                        yearly_data_coh = xr.concat([yearly_data_coh,monthly_data],dim='time')
+                dataset = yearly_data_coh.sortby('time')
+                dataset = dataset.to_dataset(dim = 'variable')
+                MASK_PATH = DSC_mask
+                mask = xr.open_rasterio(MASK_PATH)
+                mask = mask[0]
+                dataset_DSC = dataset*mask
+                
+                coh = 'COH'
+                orbit = 'ASC'
+                tile = 'ST'
+                time_series = TS_PATH.joinpath(satellite, orbit, coh, tile, str(YEAR))
+                time_series = str(time_series)
+                s1_netcdfs_coh = sorted(glob.glob(time_series + '/ST*.nc'))
+                for i,f in enumerate(s1_netcdfs_coh):
+                    monthly_data = xr.open_dataarray(f,decode_coords="all",chunks={'time':1,'x':1000,'y':1000})
+                    if i == 0:
+                        yearly_data_coh = monthly_data
+                        pass
+                    else:
+                        yearly_data_coh = xr.concat([yearly_data_coh,monthly_data],dim='time')
+                dataset = yearly_data_coh.sortby('time')
+                dataset = dataset.to_dataset(dim = 'variable')
+                MASK_PATH = ASC_mask
+                mask = xr.open_rasterio(MASK_PATH)
+                mask = mask[0]
+                dataset_ASC = dataset*mask
+                
+                fake_time = np.arange(len(dataset_ASC.time)+len(dataset_DSC.time))
+                fake_time_ASC = fake_time[:len(dataset_ASC.time)]
+                fake_time_DSC = fake_time[len(dataset_ASC.time):]
+                dataset_ASC['time'] = fake_time_ASC
+                dataset_DSC['time'] = fake_time_DSC
+                dataset = xr.concat([dataset_ASC,dataset_DSC],dim='time')
+                    
+            elif product == 'INT':
+                print('stacking intensity')
+                
+                tile = 'ST'
+                orbit = 'DSC'
+                int = 'INT'
+                time_series = TS_PATH.joinpath(satellite, orbit, int, tile, str(YEAR))
+                time_series = str(time_series)
+                s1_netcdfs_int = sorted(glob.glob(time_series + '/ST*.nc'))
+                for i,f in enumerate(s1_netcdfs_int):
+                    monthly_data = xr.open_dataarray(f,decode_coords="all",chunks={'time':1,'x':1000,'y':1000})
+                    if i == 0:
+                        yearly_data_int = monthly_data
+                        pass
+                    else:
+                        yearly_data_int = xr.concat([yearly_data_int,monthly_data],dim='time')
+                dataset = yearly_data_int.sortby('time')
+                dataset = dataset.to_dataset(dim = 'variable')
+                mask = xr.open_rasterio(DSC_mask)
+                mask = mask[0]
+                dataset_DSC = dataset*mask
+                
+                tile = 'ST'
+                orbit = 'ASC'
+                int = 'INT'
+                time_series = TS_PATH.joinpath(satellite, orbit, int, tile, str(YEAR))
+                time_series = str(time_series)
+                s1_netcdfs_int = sorted(glob.glob(time_series + '/ST*.nc'))
+                for i,f in enumerate(s1_netcdfs_int):
+                    monthly_data = xr.open_dataarray(f,decode_coords="all",chunks={'time':1,'x':1000,'y':1000})
+                    if i == 0:
+                        yearly_data_int = monthly_data
+                        pass
+                    else:
+                        yearly_data_int = xr.concat([yearly_data_int,monthly_data],dim='time')
+                dataset = yearly_data_int.sortby('time')
+                dataset = dataset.to_dataset(dim = 'variable')
+                mask = xr.open_rasterio(ASC_mask)
+                mask = mask[0]
+                dataset_ASC = dataset*mask
+                
+                fake_time = np.arange(len(dataset_ASC.time)+len(dataset_DSC.time))
+                fake_time_ASC = fake_time[:len(dataset_ASC.time)]
+                fake_time_DSC = fake_time[len(dataset_ASC.time):]
+                dataset_ASC['time'] = fake_time_ASC
+                dataset_DSC['time'] = fake_time_DSC
+                dataset = xr.concat([dataset_ASC,dataset_DSC],dim='time')
+                
+            
+            else:
+                #DSC#
+                tile = 'ST'
+                print('stacking coherence and intensity')
+                coh = 'COH'
+                orbit = 'DSC'
+                time_series = TS_PATH.joinpath(satellite, orbit, coh, tile, str(YEAR))
+                time_series = str(time_series)
+                s1_netcdfs_coh = sorted(glob.glob(time_series + '/ST*.nc'))
+                for i,f in enumerate(s1_netcdfs_coh):
+                    monthly_data = xr.open_dataarray(f,decode_coords="all",chunks={'time':1,'x':1000,'y':1000})
+                    if i == 0:
+                        yearly_data_coh = monthly_data
+                        pass
+                    else:
+                        yearly_data_coh = xr.concat([yearly_data_coh,monthly_data],dim='time')
+                yearly_data_coh = yearly_data_coh.sortby('time')    
+                
+                int = 'INT'
+                time_series = TS_PATH.joinpath(satellite, orbit, int, tile, str(YEAR))
+                time_series = str(time_series)
+                s1_netcdfs_int = sorted(glob.glob(time_series + '/ST*.nc'))
+                for i,f in enumerate(s1_netcdfs_int):
+                    monthly_data = xr.open_dataarray(f,decode_coords="all",chunks={'time':1,'x':1000,'y':1000})
+                    if i == 0:
+                        yearly_data_int = monthly_data
+                        pass
+                    else:
+                        yearly_data_int = xr.concat([yearly_data_int,monthly_data],dim='time')
+                yearly_data_int = yearly_data_int.sortby('time')
+                time_series = TS_PATH.joinpath(satellite, orbit, product, tile, str(YEAR))    
+                fake_time = np.arange(len(yearly_data_coh.time)+len(yearly_data_int.time))
+                fake_time_coh = fake_time[:len(yearly_data_coh.time)]
+                fake_time_int = fake_time[len(yearly_data_coh.time):]
+                yearly_data_coh['time'] = fake_time_coh
+                yearly_data_int['time'] = fake_time_int
+                yearly_data_coh = yearly_data_coh.to_dataset(dim='variable')
+                yearly_data_coh = yearly_data_coh.rename({'coh_vh_amp':'VH','coh_vv_amp':'VV'}).to_array()
+                dataset = xr.concat([yearly_data_coh,yearly_data_int],dim='time')
+                dataset = dataset.to_dataset(dim = 'variable')
+                MASK_PATH = DSC_mask
+                mask = xr.open_rasterio(MASK_PATH)
+                mask = mask[0]
+                dataset_DSC = dataset*mask
+                
+                #ASC#
+                print('stacking coherence and intensity')
+                coh = 'COH'
+                orbit = 'ASC'
+                tile = 'ST'
+                time_series = TS_PATH.joinpath(satellite, orbit, coh, tile, str(YEAR))
+                time_series = str(time_series)
+                s1_netcdfs_coh = sorted(glob.glob(time_series + '/ST*.nc'))
+                for i,f in enumerate(s1_netcdfs_coh):
+                    monthly_data = xr.open_dataarray(f,decode_coords="all",chunks={'time':1,'x':1000,'y':1000})
+                    if i == 0:
+                        yearly_data_coh = monthly_data
+                        pass
+                    else:
+                        yearly_data_coh = xr.concat([yearly_data_coh,monthly_data],dim='time')
+                yearly_data_coh = yearly_data_coh.sortby('time')    
+                
+                int = 'INT'
+                time_series = TS_PATH.joinpath(satellite, orbit, int, tile, str(YEAR))
+                time_series = str(time_series)
+                s1_netcdfs_int = sorted(glob.glob(time_series + '/ST*.nc'))
+                for i,f in enumerate(s1_netcdfs_int):
+                    monthly_data = xr.open_dataarray(f,decode_coords="all",chunks={'time':1,'x':1000,'y':1000})
+                    if i == 0:
+                        yearly_data_int = monthly_data
+                        pass
+                    else:
+                        yearly_data_int = xr.concat([yearly_data_int,monthly_data],dim='time')
+                yearly_data_int = yearly_data_int.sortby('time')
+                time_series = TS_PATH.joinpath(satellite, orbit, product, tile, str(YEAR))    
+                fake_time = np.arange(len(yearly_data_coh.time)+len(yearly_data_int.time))
+                fake_time_coh = fake_time[:len(yearly_data_coh.time)]
+                fake_time_int = fake_time[len(yearly_data_coh.time):]
+                yearly_data_coh['time'] = fake_time_coh
+                yearly_data_int['time'] = fake_time_int
+                yearly_data_coh = yearly_data_coh.to_dataset(dim='variable')
+                yearly_data_coh = yearly_data_coh.rename({'coh_vh_amp':'VH','coh_vv_amp':'VV'}).to_array()
+                dataset = xr.concat([yearly_data_coh,yearly_data_int],dim='time')
+                dataset = dataset.to_dataset(dim = 'variable')
+                MASK_PATH = ASC_mask
+                mask = xr.open_rasterio(MASK_PATH)
+                mask = mask[0]
+                dataset_ASC = dataset*mask
+                # dataset_ASC = dataset_ASC.drop("variable")
+                # dataset_DSC = dataset_DSC.drop("variable")
+                fake_time = np.arange(len(dataset_ASC.time)+len(dataset_DSC.time))
+                fake_time_ASC = fake_time[:len(dataset_ASC.time)]
+                fake_time_DSC = fake_time[len(dataset_ASC.time):]
+                dataset_ASC['time'] = fake_time_ASC
+                dataset_DSC['time'] = fake_time_DSC
+                dataset = xr.concat([dataset_ASC,dataset_DSC],dim='time')
+                
+                tile = "32TPS"
+                satellite = "Sentinel-2"
+                time_series = TS_PATH.joinpath(satellite, tile, str(YEAR))
+                time_series = str(time_series)
+                s2_netcdfs = sorted(glob.glob(time_series + '/*2021.nc'))
+                for i,f in enumerate(s2_netcdfs):
+                    #print(i,f)
+                    monthly_data = xr.open_dataarray(f,decode_coords="all",chunks={'time':1,'x':1000,'y':1000})
+                    if i == 0:
+                        yearly_data_S2 = monthly_data
+                        pass
+                    else:
+                        yearly_data_S2 = xr.concat([yearly_data_S2,monthly_data],dim='time')
+                        yearly_data_S2 = yearly_data_S2.sortby('time')
+                dataset_S2 = yearly_data_S2.to_dataset(dim = 'variable')
+                var_dict = dict({'B02': 'blue', 'B03': 'green', 'B04': 'red', 'B08': 'nir', 'B11': 'swir1', 'B12': 'swir2'})
+                dataset_S2 = dataset_S2.rename(var_dict)
+                dataset_S2 = dataset_S2.sortby('time')
+                
+                fake_time = np.arange(len(dataset.time)+len(dataset_S2.time))
+                fake_time_S1 = fake_time[:len(dataset.time)]
+                fake_time_S2 = fake_time[len(dataset.time):]
+                dataset['time'] = fake_time_S1
+                dataset_S2['time'] = fake_time_S2
+                
+                min_y = min(dataset.y)
+                max_y = max(dataset_S2.y)
+                min_x = min(dataset.x)
+                max_x = max(dataset_S2.x)
+                cropped_dataset_S2 = dataset_S2.sel(y=slice(max_y,min_y), x=slice(min_x,max_x))
+                cropped_dataset_S1 = dataset.sel(y=slice(min_y,max_y), x=slice(min_x,max_x))
+                dataset = xr.merge([cropped_dataset_S1,cropped_dataset_S2])
+            
+        
+        hls_ts = dataset
+        time_series = pathlib.Path(time_series)
+        print(time_series)
+        print(hls_ts)
+        
+        
+        
+            
+        if hls_ts is None:
+            continue
 
         # ---------------------------------------------------------------------
         # LAND COVER LABELS ---------------------------------------------------
         # ---------------------------------------------------------------------
 
         # get the land cover labels for the current tile
+        tile = "32TPS"
         lc = LC_LAYERS[LC_LABELS][tile]
+        #print(lc)
         ds = gdal.Open(str(lc))
 
         # ---------------------------------------------------------------------
@@ -156,10 +402,12 @@ if __name__ == '__main__':
         # ---------------------------------------------------------------------
 
         # generate filenames: training data
-        sname = dpath.joinpath(time_series.name.replace(
-            time_series.suffix, '_'.join(['', LC_LABELS, 'samples.tif'])))
-        tname = dpath.joinpath(time_series.name.replace(
-            time_series.suffix, '_'.join(['', LC_LABELS, 'train.tif'])))
+        #sname = dpath.joinpath(time_series.name.replace(
+        #    time_series.suffix, '_'.join(['', LC_LABELS, 'samples.tif'])))
+        sname = dpath.joinpath('LISS_samples.tif')
+        tname = dpath.joinpath('LISS_train.tif')
+        #tname = dpath.joinpath(time_series.name.replace(
+        #    time_series.suffix, '_'.join(['', LC_LABELS, 'train.tif'])))
         dname = dpath.joinpath(time_series.name.replace(
             time_series.suffix, '_'.join(['', LC_LABELS, 'train.nc'])))
         qname = dpath.joinpath(time_series.name.replace(
@@ -169,19 +417,22 @@ if __name__ == '__main__':
         if dname.exists() and not OVERWRITE_TRAINING_DATA:
             LogConfig.init_log('Existing training data: {}'.format(dname))
             training_data = xr.open_dataset(dname)
+            #print(dname)
+            
         else:
             # instanciate training data factory
             factory = TrainingDataFactory(hls_ts, lc, LC_LABELS, qa=APPLY_QA)
+            
 
             # generate training and validation data
             training_data, samples = factory.generate_training_data(
                 factory.hls_ts, factory.samples, factory.class_labels, NPIXEL,
-                buffer=BUFFER)
+                buffer=BUFFER,  tname=tname)
 
             # save training data spectra: NetCDF file
             LogConfig.init_log('Saving training data.')
             LOGGER.info('Saving: {}'.format(dname))
-            training_data.to_netcdf(dname, engine='h5netcdf')
+            #training_data.to_netcdf(dname, engine='h5netcdf')
 
             # save sampling and training data layer
             np2tif(factory.samples, filename=sname,
@@ -199,8 +450,9 @@ if __name__ == '__main__':
         # ---------------------------------------------------------------------
 
         # load training data to memory
+        #print(training_data)
         inputs, labels = TrainingDataFactory.load_training_data(
-            training_data, features=True, use_indices=USE_INDICES)
+            training_data, features=False, use_indices=USE_INDICES)
 
         # add digital elevation model features
         if dem is not None:
@@ -211,31 +463,41 @@ if __name__ == '__main__':
 
         # fit classifier to training data
         LogConfig.init_log('Fitting {}.'.format(clf.__class__.__name__))
+        
+        #Adding stupid stuff
+        print(inputs.shape)
+        clf = clf(oob_score=True, n_jobs=-1)
         clf.fit(np.asarray(inputs), np.asarray(labels))
+        
+        #clf.fit(np.asarray(inputs), np.asarray(labels))
+        print(clf)
 
         # ---------------------------------------------------------------------
         # PREDICT TILE --------------------------------------------------------
         # ---------------------------------------------------------------------
         LogConfig.init_log('Predicting tile {}.'.format(tile))
         y_pred, y_prob = predict_hls_tile(
-            hls_ts, clf, tile_size=TILE_SIZE, features=True,
+            hls_ts, clf, tile_size=TILE_SIZE, features=False,
             use_indices=USE_INDICES, dem=dem)
-
+        
+        
         # map working legend to WTE-land cover legend
         # y_pred_wte = array_replace(y_pred, Legend2Wte.to_numpy())
-        np2tif(y_pred, no_data=LISS.NoData.id, overwrite=True,
-               filename=str(fname).replace(fname.suffix, '_wte.tif'),
-               src_ds=ds)
+        #np2tif(y_pred, no_data=LISS.NoData.id, overwrite=True,
+        #       filename=str(fname).replace(fname.suffix, '_wte.tif'),
+        #       src_ds=ds)
 
         # ---------------------------------------------------------------------
         # SAVE PREDICTIONS AS GEOTIFF -----------------------------------------
         # ---------------------------------------------------------------------
 
         # save tile-wise predictions and associated probabilities as GeoTiff
-        np2tif(y_pred, filename=fname, no_data=Legend.NoData.id,
-               src_ds=ds, overwrite=True)
-        np2tif(y_prob, filename=pname, no_data=np.nan,
-               src_ds=ds, overwrite=True)
+        #np2tif(y_pred, filename=fname, no_data=Legend.NoData.id,
+        #       src_ds=ds, overwrite=True)
+        #np2tif(y_prob, filename=pname, no_data=np.nan,
+        #       src_ds=ds, overwrite=True)
+        y_pred.rio.to_raster(fname)
+        y_prob.rio.to_raster(pname)
 
         # store predictions and associated probabilities to generate mosaic
         y_layers.append(fname)
@@ -278,8 +540,8 @@ if __name__ == '__main__':
         # mosaic of classifications in Wte-legend
         mosaic_path = target.joinpath(basename + '.tif')
         #wte = TrainingDataFactory.read_labels(targets[0], 'LEGEND')
-        np2tif(mosaic_path, filename=mosaic_path, no_data=LISS.NoData.id,
-               src_ds=gdal.Open(str(targets[0])), overwrite=True)
+        #np2tif(mosaic_path, filename=mosaic_path, no_data=LISS.NoData.id,
+        #       src_ds=gdal.Open(str(targets[0])), overwrite=True)
 
         # mosaic of pixel quality assessment layer
         # mosaic_tiles(q_layers, targets=target.joinpath(basename + '_qa.tif'),
